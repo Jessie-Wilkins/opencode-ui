@@ -6,7 +6,12 @@ import asyncio
 import base64
 import json
 import os
+import shlex
+import shutil
+import subprocess
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException, Query, Request
@@ -28,6 +33,11 @@ UPSTREAM_PASSWORD = os.getenv("OPENCODE_SERVER_PASSWORD", "")
 OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 DEFAULT_MODEL = os.getenv("OPENCODE_MODEL", "")
 REQUEST_TIMEOUT = float(os.getenv("OPENCODE_PROXY_TIMEOUT", "30"))
+SERVER_START_TIMEOUT = float(os.getenv("OPENCODE_SERVER_START_TIMEOUT", "20"))
+OPENCODE_INSTALL_URL = "https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install"
+OPENCODE_INSTALL_VERSION = os.getenv("OPENCODE_INSTALL_VERSION", "").strip()
+OPENCODE_INSTALL_LOCK = asyncio.Lock()
+OPENCODE_SERVER_LOCK = asyncio.Lock()
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -88,6 +98,258 @@ def filtered_response_headers(headers: httpx.Headers) -> dict[str, str]:
             continue
         allowed[key] = value
     return allowed
+
+
+def opencode_binary_path() -> str | None:
+    return shutil.which("opencode")
+
+
+async def probe_opencode() -> dict[str, Any]:
+    binary = opencode_binary_path()
+    status: dict[str, Any] = {
+        "installed": bool(binary),
+        "binary": binary,
+    }
+    if not binary:
+        for candidate in (
+            Path.home() / ".opencode" / "bin" / "opencode",
+            Path.home() / ".local" / "bin" / "opencode",
+            Path.home() / "bin" / "opencode",
+        ):
+            if candidate.exists():
+                status["binary_hint"] = str(candidate)
+                break
+        return status
+
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            "--version",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        version_output = stdout.decode(errors="replace").strip() or stderr.decode(errors="replace").strip()
+        status["version"] = version_output or None
+    except Exception as exc:  # pragma: no cover - local environment specific
+        status["version_error"] = str(exc)
+    return status
+
+
+def normalize_install_version(version: str | None) -> str:
+    version = (version or "").strip()
+    return version or OPENCODE_INSTALL_VERSION
+
+
+def upstream_target() -> tuple[str, int, str]:
+    parsed = urlparse(UPSTREAM_URL)
+    host = parsed.hostname or "127.0.0.1"
+    port = parsed.port or 4096
+    scheme = parsed.scheme or "http"
+    return host, port, scheme
+
+
+def upstream_is_local() -> bool:
+    host, _, scheme = upstream_target()
+    return scheme in {"http", "https"} and host in {"127.0.0.1", "localhost", "::1"}
+
+
+async def probe_url(url: str) -> bool:
+    try:
+        auth = (UPSTREAM_USERNAME, UPSTREAM_PASSWORD) if UPSTREAM_PASSWORD else None
+        async with httpx.AsyncClient(timeout=2.0, auth=auth) as client:
+            response = await client.get(url)
+        return response.status_code < 500
+    except Exception:
+        return False
+
+
+async def install_opencode(version: str | None = None) -> dict[str, Any]:
+    requested_version = normalize_install_version(version)
+    if opencode_binary_path():
+        return {
+            "ok": True,
+            "already_installed": True,
+            "opencode": await probe_opencode(),
+        }
+
+    async with OPENCODE_INSTALL_LOCK:
+        existing = opencode_binary_path()
+        if existing:
+            return {
+                "ok": True,
+                "already_installed": True,
+                "opencode": await probe_opencode(),
+            }
+
+        env = os.environ.copy()
+        if requested_version:
+            env["VERSION"] = requested_version
+
+        command = f"curl -fsSL {shlex.quote(OPENCODE_INSTALL_URL)} | bash"
+        proc = await asyncio.create_subprocess_shell(
+            command,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+            env=env,
+        )
+        stdout, stderr = await proc.communicate()
+        output = {
+            "stdout": stdout.decode(errors="replace").strip(),
+            "stderr": stderr.decode(errors="replace").strip(),
+            "returncode": proc.returncode,
+        }
+        if proc.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "OpenCode installation failed.",
+                    "command": command,
+                    "version": requested_version or None,
+                    "output": output,
+                },
+            )
+
+        binary = opencode_binary_path()
+        if not binary:
+            for candidate in (
+                Path.home() / ".opencode" / "bin",
+                Path.home() / ".local" / "bin",
+                Path.home() / "bin",
+            ):
+                candidate_binary = candidate / "opencode"
+                if candidate_binary.exists():
+                    os.environ["PATH"] = f"{candidate}:{os.environ.get('PATH', '')}"
+                    binary = str(candidate_binary)
+                    break
+
+        if not binary:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "OpenCode installed, but the binary is still not visible on PATH.",
+                    "command": command,
+                    "version": requested_version or None,
+                    "output": output,
+                },
+            )
+
+        return {
+            "ok": True,
+            "already_installed": False,
+            "command": command,
+            "version": requested_version or None,
+            "output": output,
+            "opencode": await probe_opencode(),
+        }
+
+
+async def start_opencode_server() -> dict[str, Any]:
+    if not upstream_is_local():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "OpenCode server auto-start is only enabled for local upstream URLs.",
+                "upstream_url": UPSTREAM_URL,
+            },
+        )
+
+    host, port, _ = upstream_target()
+    status_url = f"{UPSTREAM_URL}/doc"
+
+    if await probe_url(status_url):
+        return {
+            "ok": True,
+            "already_running": True,
+            "upstream_url": UPSTREAM_URL,
+            "status_url": status_url,
+            "opencode": await probe_opencode(),
+        }
+
+    async with OPENCODE_SERVER_LOCK:
+        if await probe_url(status_url):
+            return {
+                "ok": True,
+                "already_running": True,
+                "upstream_url": UPSTREAM_URL,
+                "status_url": status_url,
+                "opencode": await probe_opencode(),
+            }
+
+        install_result = await install_opencode()
+        binary = install_result.get("opencode", {}).get("binary") or opencode_binary_path()
+        if not binary:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "OpenCode binary is not available after installation.",
+                    "install": install_result,
+                },
+            )
+
+        log_dir = Path.home() / ".cache" / "opencode-web"
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_file = log_dir / "opencode-server.log"
+        log_handle = log_file.open("ab")
+        try:
+            proc = subprocess.Popen(
+                [
+                    binary,
+                    "serve",
+                    "--hostname",
+                    host,
+                    "--port",
+                    str(port),
+                ],
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                start_new_session=True,
+            )
+        except Exception:
+            log_handle.close()
+            raise
+
+        log_handle.close()
+
+        deadline = asyncio.get_running_loop().time() + SERVER_START_TIMEOUT
+        while asyncio.get_running_loop().time() < deadline:
+            if await probe_url(status_url):
+                return {
+                    "ok": True,
+                    "already_running": False,
+                    "started": True,
+                    "pid": proc.pid,
+                    "upstream_url": UPSTREAM_URL,
+                    "status_url": status_url,
+                    "log_file": str(log_file),
+                    "install": install_result,
+                    "opencode": await probe_opencode(),
+                }
+            if proc.poll() is not None:
+                break
+            await asyncio.sleep(0.5)
+
+        if proc.poll() is not None:
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "OpenCode server exited before becoming ready.",
+                    "pid": proc.pid,
+                    "returncode": proc.returncode,
+                    "log_file": str(log_file),
+                    "install": install_result,
+                },
+            )
+
+        raise HTTPException(
+            status_code=500,
+            detail={
+                "error": "OpenCode server did not become ready in time.",
+                "pid": proc.pid,
+                "log_file": str(log_file),
+                "install": install_result,
+            },
+        )
 
 
 async def upstream_request(
@@ -180,12 +442,21 @@ async def safe_json(path: str, *, params: dict[str, Any] | None = None) -> dict[
 
 
 @app.get("/health")
-def health() -> dict[str, Any]:
+async def health() -> dict[str, Any]:
     return {
         "ok": True,
         "upstream_url": UPSTREAM_URL,
         "ollama_url": OLLAMA_URL,
         "model": DEFAULT_MODEL,
+        "opencode_server": {
+            "configured": UPSTREAM_URL,
+            "local": upstream_is_local(),
+            "reachable": await probe_url(f"{UPSTREAM_URL}/doc"),
+        },
+        "opencode": {
+            "installed": bool(opencode_binary_path()),
+            "binary": opencode_binary_path(),
+        },
     }
 
 
@@ -221,9 +492,30 @@ async def bootstrap() -> dict[str, Any]:
             "url": OLLAMA_URL,
             "model": DEFAULT_MODEL,
         },
+        "opencode": await probe_opencode(),
+        "server": {
+            "configured_url": UPSTREAM_URL,
+            "local": upstream_is_local(),
+            "reachable": await probe_url(f"{UPSTREAM_URL}/doc"),
+        },
         "endpoints": dict(zip(paths.keys(), results, strict=True)),
         "event_types": EVENT_TYPES,
     }
+
+
+@app.get("/api/opencode/status")
+async def opencode_status() -> dict[str, Any]:
+    return await probe_opencode()
+
+
+@app.post("/api/opencode/install")
+async def opencode_install(version: str | None = Query(default=None, min_length=1)) -> dict[str, Any]:
+    return await install_opencode(version)
+
+
+@app.post("/api/opencode/server/start")
+async def opencode_server_start() -> dict[str, Any]:
+    return await start_opencode_server()
 
 
 @app.get("/api/session-pack/{session_id}")
@@ -590,6 +882,8 @@ HTML_TEMPLATE = """<!doctype html>
         <span class="chip good" id="chip-connection">connecting</span>
         <span class="chip" id="chip-upstream">upstream</span>
         <span class="chip" id="chip-ollama">ollama</span>
+        <span class="chip" id="chip-opencode">opencode</span>
+        <span class="chip" id="chip-opencode-server">server</span>
         <button class="btn ghost" id="refresh-all">Refresh</button>
       </div>
     </header>
@@ -603,9 +897,13 @@ HTML_TEMPLATE = """<!doctype html>
               <small>Bridge settings</small>
             </div>
             <div id="connection-summary" class="status-card code">Loading...</div>
+            <div id="opencode-status-note" class="footer-note" style="margin-top:10px;">Checking whether OpenCode is installed...</div>
+            <div id="server-status-note" class="footer-note" style="margin-top:6px;">Checking whether the OpenCode server is reachable...</div>
             <div class="toolbar" style="margin-top:12px;">
               <a class="btn" href="/api/bootstrap" target="_blank" rel="noreferrer">Bootstrap JSON</a>
               <a class="btn" href="/api/opencode/doc" target="_blank" rel="noreferrer">Upstream Doc</a>
+              <button class="btn primary" id="install-opencode" type="button">Install OpenCode</button>
+              <button class="btn primary" id="start-opencode-server" type="button">Start OpenCode Server</button>
             </div>
           </div>
         </section>
@@ -861,11 +1159,33 @@ HTML_TEMPLATE = """<!doctype html>
       const bootstrap = state.bootstrap || {};
       const upstream = bootstrap.upstream || {};
       const ollama = bootstrap.ollama || {};
+      const opencode = bootstrap.opencode || {};
+      const server = bootstrap.server || {};
       $("chip-upstream").textContent = upstream.url || "upstream unknown";
       $("chip-ollama").textContent = ollama.url || "ollama unknown";
+      $("chip-opencode").textContent = opencode.installed
+        ? `opencode ${opencode.version || "installed"}`
+        : "opencode missing";
+      $("chip-opencode").className = opencode.installed ? "chip good" : "chip warn";
+      $("chip-opencode-server").textContent = server.reachable
+        ? "server live"
+        : server.local
+          ? "server down"
+          : "server remote";
+      $("chip-opencode-server").className = server.reachable ? "chip good" : server.local ? "chip warn" : "chip";
+      $("opencode-status-note").textContent = opencode.installed
+        ? `OpenCode is available${opencode.binary ? ` at ${opencode.binary}` : ""}.`
+        : `OpenCode is not installed${opencode.binary_hint ? `; a likely location is ${opencode.binary_hint}` : ""}. Use Install OpenCode to fetch it.`;
+      $("server-status-note").textContent = server.reachable
+        ? `OpenCode server is reachable at ${server.configured_url || upstream.url || "the configured URL"}.`
+        : server.local
+          ? `OpenCode server is not reachable at ${server.configured_url || upstream.url || "the configured URL"}. Use Start OpenCode Server to launch it locally.`
+          : `OpenCode server is configured remotely at ${server.configured_url || upstream.url || "the configured URL"}.`;
       $("connection-summary").textContent = pretty({
         upstream: upstream,
         ollama: ollama,
+        opencode: opencode,
+        server: server,
         last_model: state.selectedModelRef || ollama.model || "",
       });
     }
@@ -1210,6 +1530,36 @@ HTML_TEMPLATE = """<!doctype html>
       await navigator.clipboard.writeText(text);
     }
 
+    async function installOpenCode() {
+      const note = $("opencode-status-note");
+      note.textContent = "Installing OpenCode...";
+      try {
+        const result = await api("/api/opencode/install", { method: "POST" });
+        note.textContent = result.already_installed
+          ? "OpenCode was already installed."
+          : "OpenCode installation completed.";
+        await refreshBootstrap();
+      } catch (error) {
+        note.textContent = `OpenCode installation failed: ${error.message}`;
+        throw error;
+      }
+    }
+
+    async function startOpenCodeServer() {
+      const note = $("server-status-note");
+      note.textContent = "Starting OpenCode server...";
+      try {
+        const result = await api("/api/opencode/server/start", { method: "POST" });
+        note.textContent = result.already_running
+          ? "OpenCode server was already running."
+          : `OpenCode server started on ${result.upstream_url}.`;
+        await refreshBootstrap();
+      } catch (error) {
+        note.textContent = `OpenCode server start failed: ${error.message}`;
+        throw error;
+      }
+    }
+
     async function copyModelSnippet() {
       const modelRef = $("selected-model").value.trim();
       if (!modelRef.startsWith("ollama/")) return alert("Pick an Ollama model first.");
@@ -1279,6 +1629,8 @@ HTML_TEMPLATE = """<!doctype html>
     $("selected-model").addEventListener("change", refreshModelSnippet);
     $("copy-model-snippet").addEventListener("click", copyModelSnippet);
     $("copy-model-ref").addEventListener("click", async () => copyText($("selected-model").value.trim()));
+    $("install-opencode").addEventListener("click", installOpenCode);
+    $("start-opencode-server").addEventListener("click", startOpenCodeServer);
     $("search-file").addEventListener("click", () => searchFiles("file"));
     $("search-text").addEventListener("click", () => searchFiles("text"));
     $("search-symbol").addEventListener("click", () => searchFiles("symbol"));

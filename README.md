@@ -23,6 +23,11 @@ Override with:
 - `OLLAMA_BASE_URL`
 - `OPENCODE_MODEL`
 - `OPENCODE_PROXY_TIMEOUT`
+- `OPENCODE_INSTALL_VERSION`
+- `OPENCODE_VENV_DIR`
+- `OPENCODE_AUTO_INSTALL`
+- `OPENCODE_AUTO_START_SERVER`
+- `OPENCODE_SERVER_START_TIMEOUT`
 - `HOST`
 - `PORT`
 
@@ -37,6 +42,16 @@ Then open the UI from your TailScale-reachable host address, for example:
 ```text
 http://10.x.x.x:8088
 ```
+
+`run.sh` now bootstraps a local Python environment, installs the pinned Python dependencies, and starts a local `opencode serve` process automatically when `OPENCODE_SERVER_URL` points at localhost and the server is not already running.
+
+## Installing OpenCode
+
+If `opencode` is missing from `PATH`, the UI shows the detected status in the Connection panel and exposes an `Install OpenCode` button. That button calls `POST /api/opencode/install`, which runs the official installer from the OpenCode project.
+
+You can optionally pin the installer to a specific version by setting `OPENCODE_INSTALL_VERSION`.
+
+If you need to start the server later from the UI, use `Start OpenCode Server`.
 
 ## OpenCode docs used for the wrapper
 
