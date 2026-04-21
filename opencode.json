@@ -3,6 +3,7 @@
   "default_agent": "coder",
   "agent": {
     "coder": {
+      "mode": "primary",
       "description": "Default coding agent used by OpenCode Lens.",
       "prompt": "You are a helpful coding agent. Make focused, practical changes and explain them briefly."
     }

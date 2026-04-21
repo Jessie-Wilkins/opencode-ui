@@ -10,6 +10,8 @@ SERVER_LOG_DIR="${OPENCODE_SERVER_LOG_DIR:-$HOME/.cache/opencode-web}"
 SERVER_LOG_FILE="${OPENCODE_SERVER_LOG_FILE:-$SERVER_LOG_DIR/opencode-server.log}"
 AUTO_INSTALL_OPENCODE="${OPENCODE_AUTO_INSTALL:-1}"
 AUTO_START_SERVER="${OPENCODE_AUTO_START_SERVER:-1}"
+export OPENCODE_CONFIG="${OPENCODE_CONFIG:-$PWD/opencode.json}"
+export OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-$PWD/.opencode}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 ensure_python_env() {
@@ -105,7 +107,7 @@ start_local_opencode_server() {
   mkdir -p "$SERVER_LOG_DIR"
   touch "$SERVER_LOG_FILE"
 
-  nohup opencode >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
+  nohup env OPENCODE_CONFIG="$OPENCODE_CONFIG" OPENCODE_CONFIG_DIR="$OPENCODE_CONFIG_DIR" opencode >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
   local opencode_pid=$!
 
   for _ in $(seq 1 40); do

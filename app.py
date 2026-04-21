@@ -309,6 +309,11 @@ async def start_opencode_server() -> dict[str, Any]:
             proc = subprocess.Popen(
                 [binary],
                 cwd=str(Path.cwd()),
+                env={
+                    **os.environ,
+                    "OPENCODE_CONFIG": str(Path.cwd() / "opencode.json"),
+                    "OPENCODE_CONFIG_DIR": str(Path.cwd() / ".opencode"),
+                },
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
