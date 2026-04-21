@@ -97,10 +97,15 @@ start_local_opencode_server() {
   local target host port
   read -r host port < <(parse_upstream_target)
 
+  if [[ "$port" != "4096" ]]; then
+    echo "OpenCode auto-start only supports the default local port 4096; skipping start for ${UPSTREAM_URL}." >&2
+    return 0
+  fi
+
   mkdir -p "$SERVER_LOG_DIR"
   touch "$SERVER_LOG_FILE"
 
-  opencode serve --hostname "$host" --port "$port" >>"$SERVER_LOG_FILE" 2>&1 &
+  nohup opencode >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
   local opencode_pid=$!
 
   for _ in $(seq 1 40); do

@@ -154,6 +154,11 @@ def upstream_is_local() -> bool:
     return scheme in {"http", "https"} and host in {"127.0.0.1", "localhost", "::1"}
 
 
+def upstream_is_default_local_server() -> bool:
+    host, port, _ = upstream_target()
+    return host in {"127.0.0.1", "localhost", "::1"} and port == 4096
+
+
 async def probe_url(url: str) -> bool:
     try:
         auth = (UPSTREAM_USERNAME, UPSTREAM_PASSWORD) if UPSTREAM_PASSWORD else None
@@ -254,6 +259,15 @@ async def start_opencode_server() -> dict[str, Any]:
             },
         )
 
+    if not upstream_is_default_local_server():
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "Auto-start only supports the default local OpenCode port 4096.",
+                "upstream_url": UPSTREAM_URL,
+            },
+        )
+
     host, port, _ = upstream_target()
     status_url = f"{UPSTREAM_URL}/doc"
 
@@ -293,14 +307,8 @@ async def start_opencode_server() -> dict[str, Any]:
         log_handle = log_file.open("ab")
         try:
             proc = subprocess.Popen(
-                [
-                    binary,
-                    "serve",
-                    "--hostname",
-                    host,
-                    "--port",
-                    str(port),
-                ],
+                [binary],
+                cwd=str(Path.cwd()),
                 stdout=log_handle,
                 stderr=subprocess.STDOUT,
                 start_new_session=True,
@@ -321,6 +329,8 @@ async def start_opencode_server() -> dict[str, Any]:
                     "pid": proc.pid,
                     "upstream_url": UPSTREAM_URL,
                     "status_url": status_url,
+                    "host": host,
+                    "port": port,
                     "log_file": str(log_file),
                     "install": install_result,
                     "opencode": await probe_opencode(),
@@ -336,6 +346,8 @@ async def start_opencode_server() -> dict[str, Any]:
                     "error": "OpenCode server exited before becoming ready.",
                     "pid": proc.pid,
                     "returncode": proc.returncode,
+                    "host": host,
+                    "port": port,
                     "log_file": str(log_file),
                     "install": install_result,
                 },
@@ -346,6 +358,8 @@ async def start_opencode_server() -> dict[str, Any]:
             detail={
                 "error": "OpenCode server did not become ready in time.",
                 "pid": proc.pid,
+                "host": host,
+                "port": port,
                 "log_file": str(log_file),
                 "install": install_result,
             },
