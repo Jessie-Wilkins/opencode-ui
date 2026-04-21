@@ -436,6 +436,8 @@ async def upstream_request(
             try:
                 async for chunk in upstream.aiter_raw():
                     yield chunk
+            except (httpx.ReadError, httpx.RemoteProtocolError, httpx.StreamError):
+                return
             finally:
                 await upstream.aclose()
                 await client.aclose()
@@ -688,6 +690,11 @@ async def opencode_proxy(path: str, request: Request) -> Response:
 @app.get("/api/events")
 async def events() -> Response:
     return await upstream_request("GET", "event", stream=True)
+
+
+@app.get("/favicon.ico")
+async def favicon() -> Response:
+    return Response(status_code=204)
 
 
 HTML_TEMPLATE = """<!doctype html>
