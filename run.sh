@@ -12,6 +12,7 @@ AUTO_INSTALL_OPENCODE="${OPENCODE_AUTO_INSTALL:-1}"
 AUTO_START_SERVER="${OPENCODE_AUTO_START_SERVER:-1}"
 export OPENCODE_CONFIG="${OPENCODE_CONFIG:-$PWD/opencode.json}"
 export OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-$PWD/.opencode}"
+OPENCODE_INSTALL_URL="${OPENCODE_INSTALL_URL:-https://opencode.ai/install}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 
 ensure_python_env() {
@@ -39,7 +40,10 @@ ensure_python_env() {
 
 ensure_opencode_binary() {
   if command -v opencode >/dev/null 2>&1; then
-    return 0
+    if opencode serve --help >/dev/null 2>&1; then
+      return 0
+    fi
+    echo "Installed opencode binary is incompatible with OpenCode Lens. Expected a version with 'opencode serve' support." >&2
   fi
 
   if [[ "$AUTO_INSTALL_OPENCODE" == "0" ]]; then
@@ -47,17 +51,21 @@ ensure_opencode_binary() {
     return 1
   fi
 
-  curl -fsSL "https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install" | \
+  curl -fsSL "$OPENCODE_INSTALL_URL" | \
     VERSION="${OPENCODE_INSTALL_VERSION:-}" bash
 
   for candidate in "$HOME/.opencode/bin" "$HOME/.local/bin" "$HOME/bin"; do
     if [[ -x "$candidate/opencode" ]]; then
       export PATH="$candidate:$PATH"
-      return 0
+      break
     fi
   done
 
-  command -v opencode >/dev/null 2>&1
+  if ! command -v opencode >/dev/null 2>&1; then
+    return 1
+  fi
+
+  opencode serve --help >/dev/null 2>&1
 }
 
 upstream_is_local() {
@@ -107,7 +115,7 @@ start_local_opencode_server() {
   mkdir -p "$SERVER_LOG_DIR"
   touch "$SERVER_LOG_FILE"
 
-  nohup env OPENCODE_CONFIG="$OPENCODE_CONFIG" OPENCODE_CONFIG_DIR="$OPENCODE_CONFIG_DIR" opencode >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
+  nohup env OPENCODE_CONFIG="$OPENCODE_CONFIG" OPENCODE_CONFIG_DIR="$OPENCODE_CONFIG_DIR" opencode serve --hostname "$host" --port "$port" >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
   local opencode_pid=$!
 
   for _ in $(seq 1 40); do

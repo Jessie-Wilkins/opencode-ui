@@ -45,9 +45,11 @@ http://10.x.x.x:8088
 
 `run.sh` now bootstraps a local Python environment, installs the pinned Python dependencies, and starts a local `opencode serve` process automatically when `OPENCODE_SERVER_URL` points at localhost and the server is not already running.
 
+This wrapper requires a server-capable OpenCode build that supports `opencode serve`. The archived `opencode-ai/opencode` `v0.0.55` binary does not expose that command and is not compatible with this project.
+
 ## Installing OpenCode
 
-If `opencode` is missing from `PATH`, the UI shows the detected status in the Connection panel and exposes an `Install OpenCode` button. That button calls `POST /api/opencode/install`, which runs the official installer from the OpenCode project.
+If `opencode` is missing from `PATH`, or if the installed binary does not support `opencode serve`, the UI shows the detected status in the Connection panel and exposes an `Install OpenCode` button. That button calls `POST /api/opencode/install`, which runs the current official installer from `https://opencode.ai/install`.
 
 You can optionally pin the installer to a specific version by setting `OPENCODE_INSTALL_VERSION`.
 

@@ -34,7 +34,7 @@ OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
 DEFAULT_MODEL = os.getenv("OPENCODE_MODEL", "")
 REQUEST_TIMEOUT = float(os.getenv("OPENCODE_PROXY_TIMEOUT", "30"))
 SERVER_START_TIMEOUT = float(os.getenv("OPENCODE_SERVER_START_TIMEOUT", "20"))
-OPENCODE_INSTALL_URL = "https://raw.githubusercontent.com/opencode-ai/opencode/refs/heads/main/install"
+OPENCODE_INSTALL_URL = os.getenv("OPENCODE_INSTALL_URL", "https://opencode.ai/install")
 OPENCODE_INSTALL_VERSION = os.getenv("OPENCODE_INSTALL_VERSION", "").strip()
 OPENCODE_INSTALL_LOCK = asyncio.Lock()
 OPENCODE_SERVER_LOCK = asyncio.Lock()
@@ -133,6 +133,8 @@ async def probe_opencode() -> dict[str, Any]:
         status["version"] = version_output or None
     except Exception as exc:  # pragma: no cover - local environment specific
         status["version_error"] = str(exc)
+
+    status["server_compatible"] = await opencode_supports_server(binary)
     return status
 
 
@@ -169,9 +171,28 @@ async def probe_url(url: str) -> bool:
         return False
 
 
+async def opencode_supports_server(binary: str | None = None) -> bool:
+    binary = binary or opencode_binary_path()
+    if not binary:
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            binary,
+            "serve",
+            "--help",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        await proc.communicate()
+        return proc.returncode == 0
+    except Exception:
+        return False
+
+
 async def install_opencode(version: str | None = None) -> dict[str, Any]:
     requested_version = normalize_install_version(version)
-    if opencode_binary_path():
+    current_binary = opencode_binary_path()
+    if current_binary and await opencode_supports_server(current_binary):
         return {
             "ok": True,
             "already_installed": True,
@@ -180,7 +201,7 @@ async def install_opencode(version: str | None = None) -> dict[str, Any]:
 
     async with OPENCODE_INSTALL_LOCK:
         existing = opencode_binary_path()
-        if existing:
+        if existing and await opencode_supports_server(existing):
             return {
                 "ok": True,
                 "already_installed": True,
@@ -236,6 +257,18 @@ async def install_opencode(version: str | None = None) -> dict[str, Any]:
                     "command": command,
                     "version": requested_version or None,
                     "output": output,
+                },
+            )
+
+        if not await opencode_supports_server(binary):
+            raise HTTPException(
+                status_code=500,
+                detail={
+                    "error": "Installed OpenCode binary does not support the HTTP server required by OpenCode Lens.",
+                    "command": command,
+                    "version": requested_version or None,
+                    "output": output,
+                    "binary": binary,
                 },
             )
 
@@ -307,7 +340,7 @@ async def start_opencode_server() -> dict[str, Any]:
         log_handle = log_file.open("ab")
         try:
             proc = subprocess.Popen(
-                [binary],
+                [binary, "serve", "--hostname", host, "--port", str(port)],
                 cwd=str(Path.cwd()),
                 env={
                     **os.environ,
