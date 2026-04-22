@@ -184,6 +184,8 @@ def project_config_from_settings(settings: dict[str, Any]) -> dict[str, Any]:
         config["model"] = default_model
     if ollama_url:
         provider: dict[str, Any] = {
+            "npm": "@ai-sdk/openai-compatible",
+            "name": "Ollama (local)",
             "options": {
                 "baseURL": f"{ollama_url}/v1",
             },
@@ -811,6 +813,8 @@ async def ollama_snippet(model: str = Query(..., min_length=1)) -> dict[str, Any
         "model": provider_model,
         "provider": {
             "ollama": {
+                "npm": "@ai-sdk/openai-compatible",
+                "name": "Ollama (local)",
                 "options": {
                     "baseURL": f"{OLLAMA_URL}/v1",
                 },
