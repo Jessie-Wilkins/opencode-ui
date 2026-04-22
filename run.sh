@@ -54,6 +54,61 @@ AUTO_INSTALL_OPENCODE="${OPENCODE_AUTO_INSTALL:-1}"
 AUTO_START_SERVER="${OPENCODE_AUTO_START_SERVER:-1}"
 OPENCODE_INSTALL_URL="${OPENCODE_INSTALL_URL:-https://opencode.ai/install}"
 
+sync_project_config_models() {
+  "$PYTHON_BIN" - "$OPENCODE_CONFIG" "${OLLAMA_BASE_URL:-http://127.0.0.1:11434}" <<'PY'
+import json
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+config_path = Path(sys.argv[1])
+ollama_base = sys.argv[2].rstrip("/")
+
+if not config_path.exists():
+    raise SystemExit(0)
+
+try:
+    config = json.loads(config_path.read_text())
+except Exception:
+    raise SystemExit(0)
+
+model_ids = []
+seen = set()
+for suffix, extractor in (
+    ("/api/tags", lambda payload: [entry.get("name") or entry.get("model") for entry in payload.get("models", [])]),
+    ("/v1/models", lambda payload: [entry.get("id") for entry in payload.get("data", [])]),
+):
+    try:
+        with urllib.request.urlopen(ollama_base + suffix, timeout=5) as response:
+            payload = json.load(response)
+        for model_id in extractor(payload):
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                model_ids.append(model_id)
+        if model_ids:
+            break
+    except Exception:
+        continue
+
+default_model = str(config.get("model") or "")
+if default_model.startswith("ollama/"):
+    model_id = default_model.split("/", 1)[1].strip()
+    if model_id and model_id not in seen:
+        seen.add(model_id)
+        model_ids.append(model_id)
+
+provider = config.setdefault("provider", {}).setdefault("ollama", {})
+provider.setdefault("npm", "@ai-sdk/openai-compatible")
+provider.setdefault("name", "Ollama (local)")
+provider.setdefault("options", {})["baseURL"] = f"{ollama_base}/v1"
+if model_ids:
+    provider["models"] = {model_id: {"name": model_id} for model_id in model_ids}
+
+config_path.write_text(json.dumps(config, indent=2) + "\n")
+PY
+}
+
 ensure_python_env() {
   local python_bin="$1"
   local venv_python="$VENV_DIR/bin/python"
@@ -142,6 +197,7 @@ start_local_opencode_server() {
   fi
 
   ensure_opencode_binary
+  sync_project_config_models
 
   local target host port
   read -r host port < <(parse_upstream_target)

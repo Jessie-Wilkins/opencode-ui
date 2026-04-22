@@ -174,6 +174,13 @@ def load_app_settings() -> dict[str, Any]:
 
 
 def project_config_from_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    return project_config_from_settings_with_models(settings, None)
+
+
+def project_config_from_settings_with_models(
+    settings: dict[str, Any],
+    ollama_model_ids: list[str] | None,
+) -> dict[str, Any]:
     config: dict[str, Any] = {
         "$schema": "https://opencode.ai/config.json",
         "default_agent": settings["default_agent"],
@@ -190,22 +197,96 @@ def project_config_from_settings(settings: dict[str, Any]) -> dict[str, Any]:
                 "baseURL": f"{ollama_url}/v1",
             },
         }
+        model_ids: list[str] = []
+        seen: set[str] = set()
+        for model_id in ollama_model_ids or []:
+            cleaned = str(model_id).strip()
+            if cleaned and cleaned not in seen:
+                seen.add(cleaned)
+                model_ids.append(cleaned)
         if default_model.startswith("ollama/"):
             model_id = default_model.split("/", 1)[1].strip()
-            if model_id:
-                provider["models"] = {
-                    model_id: {
-                        "name": model_id,
-                    }
+            if model_id and model_id not in seen:
+                seen.add(model_id)
+                model_ids.append(model_id)
+        if model_ids:
+            provider["models"] = {
+                model_id: {
+                    "name": model_id,
                 }
+                for model_id in model_ids
+            }
         config["provider"] = {
             "ollama": provider,
         }
     return config
 
 
+def fetch_ollama_model_ids(ollama_url: str, timeout: float = 5.0) -> list[str]:
+    urls = [f"{ollama_url.rstrip('/')}/api/tags", f"{ollama_url.rstrip('/')}/v1/models"]
+    for url in urls:
+        try:
+            with httpx.Client(timeout=timeout) as client:
+                response = client.get(url)
+            response.raise_for_status()
+            payload = response.json()
+            if url.endswith("/api/tags"):
+                return [
+                    entry.get("name") or entry.get("model")
+                    for entry in payload.get("models", [])
+                    if entry.get("name") or entry.get("model")
+                ]
+            return [
+                entry.get("id")
+                for entry in payload.get("data", [])
+                if entry.get("id")
+            ]
+        except Exception:
+            continue
+    return []
+
+
+def read_project_config() -> dict[str, Any]:
+    if PROJECT_CONFIG_FILE.exists():
+        try:
+            loaded = json.loads(PROJECT_CONFIG_FILE.read_text())
+            if isinstance(loaded, dict):
+                return loaded
+        except Exception:
+            pass
+    return project_config_from_settings(APP_SETTINGS)
+
+
+def normalize_model_ref(value: Any) -> Any:
+    if not isinstance(value, str):
+        return value
+    ref = value.strip()
+    if "/" not in ref:
+        return value
+    provider_id, model_id = ref.split("/", 1)
+    provider_id = provider_id.strip()
+    model_id = model_id.strip()
+    if not provider_id or not model_id:
+        return value
+    return {
+        "providerID": provider_id,
+        "modelID": model_id,
+    }
+
+
+def normalize_upstream_body(body: Any) -> Any:
+    if not isinstance(body, dict):
+        return body
+    normalized = dict(body)
+    if "model" in normalized:
+        normalized["model"] = normalize_model_ref(normalized["model"])
+    return normalized
+
+
 def write_project_config(settings: dict[str, Any]) -> None:
-    PROJECT_CONFIG_FILE.write_text(json.dumps(project_config_from_settings(settings), indent=2) + "\n")
+    model_ids = fetch_ollama_model_ids(str(settings.get("ollama_url") or ""))
+    config = project_config_from_settings_with_models(settings, model_ids)
+    PROJECT_CONFIG_FILE.write_text(json.dumps(config, indent=2) + "\n")
 
 
 def save_app_settings(settings: dict[str, Any]) -> dict[str, Any]:
@@ -466,6 +547,10 @@ async def start_opencode_server() -> dict[str, Any]:
                 "opencode": await probe_opencode(),
             }
 
+        # Keep the generated provider model registry aligned with the current Ollama instance
+        # before the local OpenCode server boots.
+        write_project_config(APP_SETTINGS)
+
         install_result = await install_opencode()
         binary = install_result.get("opencode", {}).get("binary") or opencode_binary_path()
         if not binary:
@@ -692,7 +777,7 @@ async def bootstrap() -> dict[str, Any]:
         },
         "opencode": await probe_opencode(),
         "settings": public_app_settings(),
-        "project_config": project_config_from_settings(APP_SETTINGS),
+        "project_config": read_project_config(),
         "server": {
             "configured_url": UPSTREAM_URL,
             "local": upstream_is_local(),
@@ -707,7 +792,7 @@ async def bootstrap() -> dict[str, Any]:
 async def get_settings() -> dict[str, Any]:
     return {
         "settings": public_app_settings(),
-        "project_config": project_config_from_settings(APP_SETTINGS),
+        "project_config": read_project_config(),
     }
 
 
@@ -719,7 +804,7 @@ async def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
         return {
             "ok": True,
             "settings": saved,
-            "project_config": project_config_from_settings(saved),
+            "project_config": read_project_config(),
         }
 
 
@@ -843,6 +928,7 @@ async def opencode_proxy(path: str, request: Request) -> Response:
                 body = json.loads(raw)
             except json.JSONDecodeError:
                 body = raw.decode(errors="replace")
+    body = normalize_upstream_body(body)
 
     if request.method == "GET" and path == "event":
         return await upstream_request("GET", path, params=dict(request.query_params), stream=True)
@@ -1846,6 +1932,14 @@ HTML_TEMPLATE = """<!doctype html>
       if (values.agent) payload.agent = values.agent;
       if (values.model) payload.model = values.model;
       if (values.noReply === "true") payload.noReply = true;
+      const selectedModel = values.model?.trim();
+      if (selectedModel && selectedModel.startsWith("ollama/")) {
+        const knownModels = new Set((state.ollama || []).map((entry) => entry.provider_ref));
+        if (knownModels.size && !knownModels.has(selectedModel)) {
+          $("prompt-note").textContent = `Unable to send message: ${selectedModel} is not available from the current Ollama server.`;
+          return;
+        }
+      }
       try {
         await sendFormJson(`/api/opencode/session/${encodeURIComponent(state.selectedSessionId)}/message`, payload);
         form.reset();
