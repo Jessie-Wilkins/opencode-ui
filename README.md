@@ -47,6 +47,9 @@ http://10.x.x.x:8088
 
 This wrapper requires a server-capable OpenCode build that supports `opencode serve`. The archived `opencode-ai/opencode` `v0.0.55` binary does not expose that command and is not compatible with this project.
 
+The sidebar now includes a saved Settings panel for the wrapper and project defaults. Changing the Ollama base URL there also regenerates `opencode.json`, so the UI and the OpenCode runtime stay aligned.
+Provider and model changes take effect after you restart the local OpenCode server.
+
 ## Installing OpenCode
 
 If `opencode` is missing from `PATH`, or if the installed binary does not support `opencode serve`, the UI shows the detected status in the Connection panel and exposes an `Install OpenCode` button. That button calls `POST /api/opencode/install`, which runs the current official installer from `https://opencode.ai/install`.

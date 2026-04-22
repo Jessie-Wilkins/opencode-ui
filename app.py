@@ -27,17 +27,25 @@ app = FastAPI(
     ),
 )
 
-UPSTREAM_URL = os.getenv("OPENCODE_SERVER_URL", "http://127.0.0.1:4096").rstrip("/")
-UPSTREAM_USERNAME = os.getenv("OPENCODE_SERVER_USERNAME", "opencode")
-UPSTREAM_PASSWORD = os.getenv("OPENCODE_SERVER_PASSWORD", "")
-OLLAMA_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-DEFAULT_MODEL = os.getenv("OPENCODE_MODEL", "")
-REQUEST_TIMEOUT = float(os.getenv("OPENCODE_PROXY_TIMEOUT", "30"))
-SERVER_START_TIMEOUT = float(os.getenv("OPENCODE_SERVER_START_TIMEOUT", "20"))
-OPENCODE_INSTALL_URL = os.getenv("OPENCODE_INSTALL_URL", "https://opencode.ai/install")
-OPENCODE_INSTALL_VERSION = os.getenv("OPENCODE_INSTALL_VERSION", "").strip()
+SETTINGS_FILE = Path(__file__).with_name("settings.json")
+PROJECT_CONFIG_FILE = Path(__file__).with_name("opencode.json")
+
+UPSTREAM_URL = "http://127.0.0.1:4096"
+UPSTREAM_USERNAME = "opencode"
+UPSTREAM_PASSWORD = ""
+OLLAMA_URL = "http://127.0.0.1:11434"
+DEFAULT_MODEL = ""
+DEFAULT_AGENT = "build"
+REQUEST_TIMEOUT = 30.0
+SERVER_START_TIMEOUT = 20.0
+OPENCODE_INSTALL_URL = "https://opencode.ai/install"
+OPENCODE_INSTALL_VERSION = ""
+AUTO_INSTALL_OPENCODE = True
+AUTO_START_SERVER = True
 OPENCODE_INSTALL_LOCK = asyncio.Lock()
 OPENCODE_SERVER_LOCK = asyncio.Lock()
+SETTINGS_LOCK = asyncio.Lock()
+APP_SETTINGS: dict[str, Any] = {}
 
 HOP_BY_HOP_HEADERS = {
     "connection",
@@ -98,6 +106,128 @@ def filtered_response_headers(headers: httpx.Headers) -> dict[str, str]:
             continue
         allowed[key] = value
     return allowed
+
+
+def default_app_settings() -> dict[str, Any]:
+    return {
+        "upstream_url": os.getenv("OPENCODE_SERVER_URL", "http://127.0.0.1:4096").rstrip("/"),
+        "upstream_username": os.getenv("OPENCODE_SERVER_USERNAME", "opencode"),
+        "upstream_password": os.getenv("OPENCODE_SERVER_PASSWORD", ""),
+        "ollama_url": os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/"),
+        "default_model": os.getenv("OPENCODE_MODEL", ""),
+        "default_agent": os.getenv("OPENCODE_DEFAULT_AGENT", "build").strip() or "build",
+        "proxy_timeout": float(os.getenv("OPENCODE_PROXY_TIMEOUT", "30")),
+        "server_start_timeout": float(os.getenv("OPENCODE_SERVER_START_TIMEOUT", "20")),
+        "install_url": os.getenv("OPENCODE_INSTALL_URL", "https://opencode.ai/install"),
+        "install_version": os.getenv("OPENCODE_INSTALL_VERSION", "").strip(),
+        "auto_install_opencode": os.getenv("OPENCODE_AUTO_INSTALL", "1") != "0",
+        "auto_start_server": os.getenv("OPENCODE_AUTO_START_SERVER", "1") != "0",
+    }
+
+
+def coerce_bool(value: Any, default: bool) -> bool:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        lowered = value.strip().lower()
+        if lowered in {"1", "true", "yes", "on"}:
+            return True
+        if lowered in {"0", "false", "no", "off"}:
+            return False
+    return default
+
+
+def normalize_app_settings(raw: dict[str, Any]) -> dict[str, Any]:
+    defaults = default_app_settings()
+    settings = {**defaults, **raw}
+    settings["upstream_url"] = str(settings.get("upstream_url") or defaults["upstream_url"]).rstrip("/")
+    settings["upstream_username"] = str(settings.get("upstream_username") or defaults["upstream_username"]).strip()
+    settings["upstream_password"] = str(settings.get("upstream_password") or "")
+    settings["ollama_url"] = str(settings.get("ollama_url") or defaults["ollama_url"]).rstrip("/")
+    settings["default_model"] = str(settings.get("default_model") or "").strip()
+    settings["default_agent"] = str(settings.get("default_agent") or defaults["default_agent"]).strip() or "build"
+    try:
+        settings["proxy_timeout"] = float(settings.get("proxy_timeout", defaults["proxy_timeout"]))
+    except (TypeError, ValueError):
+        settings["proxy_timeout"] = defaults["proxy_timeout"]
+    try:
+        settings["server_start_timeout"] = float(settings.get("server_start_timeout", defaults["server_start_timeout"]))
+    except (TypeError, ValueError):
+        settings["server_start_timeout"] = defaults["server_start_timeout"]
+    settings["install_url"] = str(settings.get("install_url") or defaults["install_url"]).strip()
+    settings["install_version"] = str(settings.get("install_version") or "").strip()
+    settings["auto_install_opencode"] = coerce_bool(settings.get("auto_install_opencode"), defaults["auto_install_opencode"])
+    settings["auto_start_server"] = coerce_bool(settings.get("auto_start_server"), defaults["auto_start_server"])
+    return settings
+
+
+def load_app_settings() -> dict[str, Any]:
+    settings = default_app_settings()
+    if SETTINGS_FILE.exists():
+        try:
+            loaded = json.loads(SETTINGS_FILE.read_text())
+            if isinstance(loaded, dict):
+                settings.update(loaded)
+        except Exception:  # pragma: no cover - local file corruption is handled as defaults
+            pass
+    return normalize_app_settings(settings)
+
+
+def project_config_from_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    config: dict[str, Any] = {
+        "$schema": "https://opencode.ai/config.json",
+        "default_agent": settings["default_agent"],
+    }
+    if settings["default_model"]:
+        config["model"] = settings["default_model"]
+    if settings["ollama_url"]:
+        config["provider"] = {
+            "ollama": {
+                "options": {
+                    "baseURL": f"{settings['ollama_url'].rstrip('/')}/v1",
+                },
+            }
+        }
+    return config
+
+
+def write_project_config(settings: dict[str, Any]) -> None:
+    PROJECT_CONFIG_FILE.write_text(json.dumps(project_config_from_settings(settings), indent=2) + "\n")
+
+
+def save_app_settings(settings: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_app_settings(settings)
+    SETTINGS_FILE.write_text(json.dumps(normalized, indent=2, sort_keys=True) + "\n")
+    write_project_config(normalized)
+    apply_app_settings(normalized)
+    return normalized
+
+
+def public_app_settings() -> dict[str, Any]:
+    return {key: APP_SETTINGS[key] for key in APP_SETTINGS}
+
+
+def apply_app_settings(settings: dict[str, Any]) -> None:
+    global APP_SETTINGS, UPSTREAM_URL, UPSTREAM_USERNAME, UPSTREAM_PASSWORD, OLLAMA_URL, DEFAULT_MODEL
+    global DEFAULT_AGENT, REQUEST_TIMEOUT, SERVER_START_TIMEOUT, OPENCODE_INSTALL_URL, OPENCODE_INSTALL_VERSION
+    global AUTO_INSTALL_OPENCODE, AUTO_START_SERVER
+
+    APP_SETTINGS = normalize_app_settings(settings)
+    UPSTREAM_URL = APP_SETTINGS["upstream_url"]
+    UPSTREAM_USERNAME = APP_SETTINGS["upstream_username"]
+    UPSTREAM_PASSWORD = APP_SETTINGS["upstream_password"]
+    OLLAMA_URL = APP_SETTINGS["ollama_url"]
+    DEFAULT_MODEL = APP_SETTINGS["default_model"]
+    DEFAULT_AGENT = APP_SETTINGS["default_agent"]
+    REQUEST_TIMEOUT = APP_SETTINGS["proxy_timeout"]
+    SERVER_START_TIMEOUT = APP_SETTINGS["server_start_timeout"]
+    OPENCODE_INSTALL_URL = APP_SETTINGS["install_url"]
+    OPENCODE_INSTALL_VERSION = APP_SETTINGS["install_version"]
+    AUTO_INSTALL_OPENCODE = APP_SETTINGS["auto_install_opencode"]
+    AUTO_START_SERVER = APP_SETTINGS["auto_start_server"]
+
+
+apply_app_settings(load_app_settings())
 
 
 def opencode_binary_path() -> str | None:
@@ -502,6 +632,7 @@ async def health() -> dict[str, Any]:
         "upstream_url": UPSTREAM_URL,
         "ollama_url": OLLAMA_URL,
         "model": DEFAULT_MODEL,
+        "default_agent": DEFAULT_AGENT,
         "opencode_server": {
             "configured": UPSTREAM_URL,
             "local": upstream_is_local(),
@@ -547,6 +678,8 @@ async def bootstrap() -> dict[str, Any]:
             "model": DEFAULT_MODEL,
         },
         "opencode": await probe_opencode(),
+        "settings": public_app_settings(),
+        "project_config": project_config_from_settings(APP_SETTINGS),
         "server": {
             "configured_url": UPSTREAM_URL,
             "local": upstream_is_local(),
@@ -555,6 +688,26 @@ async def bootstrap() -> dict[str, Any]:
         "endpoints": dict(zip(paths.keys(), results, strict=True)),
         "event_types": EVENT_TYPES,
     }
+
+
+@app.get("/api/settings")
+async def get_settings() -> dict[str, Any]:
+    return {
+        "settings": public_app_settings(),
+        "project_config": project_config_from_settings(APP_SETTINGS),
+    }
+
+
+@app.put("/api/settings")
+async def update_settings(payload: dict[str, Any]) -> dict[str, Any]:
+    async with SETTINGS_LOCK:
+        merged = {**APP_SETTINGS, **payload}
+        saved = save_app_settings(merged)
+        return {
+            "ok": True,
+            "settings": saved,
+            "project_config": project_config_from_settings(saved),
+        }
 
 
 @app.get("/api/opencode/status")
@@ -970,6 +1123,73 @@ HTML_TEMPLATE = """<!doctype html>
         <section class="panel">
           <div class="pad">
             <div class="section-title">
+              <h2>Settings</h2>
+              <small>Saved locally</small>
+            </div>
+            <form id="settings-form" class="controls">
+              <div class="row">
+                <label>OpenCode server URL
+                  <input name="upstream_url" placeholder="http://127.0.0.1:4096" />
+                </label>
+                <label>Ollama base URL
+                  <input name="ollama_url" placeholder="http://127.0.0.1:11434" />
+                </label>
+              </div>
+              <div class="row">
+                <label>Server username
+                  <input name="upstream_username" placeholder="opencode" />
+                </label>
+                <label>Server password
+                  <input name="upstream_password" placeholder="optional" type="password" />
+                </label>
+              </div>
+              <div class="row">
+                <label>Default model
+                  <input name="default_model" placeholder="ollama/llama3.1" />
+                </label>
+                <label>Default agent
+                  <input name="default_agent" placeholder="build" />
+                </label>
+              </div>
+              <div class="row">
+                <label>Proxy timeout
+                  <input name="proxy_timeout" type="number" step="0.5" min="1" />
+                </label>
+                <label>Server start timeout
+                  <input name="server_start_timeout" type="number" step="0.5" min="1" />
+                </label>
+              </div>
+              <div class="row">
+                <label>Installer URL
+                  <input name="install_url" placeholder="https://opencode.ai/install" />
+                </label>
+                <label>Installer version
+                  <input name="install_version" placeholder="optional" />
+                </label>
+              </div>
+              <div class="row">
+                <label style="align-content: start;">
+                  <span>Auto install OpenCode</span>
+                  <input name="auto_install_opencode" type="checkbox" />
+                </label>
+                <label style="align-content: start;">
+                  <span>Auto start local server</span>
+                  <input name="auto_start_server" type="checkbox" />
+                </label>
+              </div>
+              <div class="btnrow">
+                <button class="btn primary" type="submit">Save settings</button>
+                <button class="btn" type="button" id="reload-settings">Reload</button>
+              </div>
+              <div class="footer-note" id="settings-note">Settings are stored in `settings.json` and used to generate the project OpenCode config. Restart the local OpenCode server after changing provider or model defaults.</div>
+              <div class="code" id="project-config-preview">Loading config preview...</div>
+            </form>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="pad">
+            <div class="section-title">
               <h2>Sessions</h2>
               <small id="session-count">0</small>
             </div>
@@ -1169,6 +1389,7 @@ HTML_TEMPLATE = """<!doctype html>
   <script>
     const state = {
       bootstrap: null,
+      settings: null,
       sessions: [],
       sessionPack: null,
       selectedSessionId: null,
@@ -1212,6 +1433,31 @@ HTML_TEMPLATE = """<!doctype html>
       const el = $("chip-connection");
       el.textContent = text;
       el.className = ok ? "chip good" : "chip warn";
+    }
+
+    function renderSettings() {
+      const settings = state.settings || state.bootstrap?.settings || {};
+      const form = $("settings-form");
+      if (!form) return;
+      const fields = {
+        upstream_url: settings.upstream_url || "",
+        ollama_url: settings.ollama_url || "",
+        upstream_username: settings.upstream_username || "",
+        upstream_password: settings.upstream_password || "",
+        default_model: settings.default_model || "",
+        default_agent: settings.default_agent || "",
+        proxy_timeout: settings.proxy_timeout ?? "",
+        server_start_timeout: settings.server_start_timeout ?? "",
+        install_url: settings.install_url || "",
+        install_version: settings.install_version || "",
+      };
+      Object.entries(fields).forEach(([name, value]) => {
+        const input = form.elements.namedItem(name);
+        if (input) input.value = value;
+      });
+      form.elements.namedItem("auto_install_opencode").checked = Boolean(settings.auto_install_opencode);
+      form.elements.namedItem("auto_start_server").checked = Boolean(settings.auto_start_server);
+      $("project-config-preview").textContent = pretty(state.bootstrap?.project_config || {});
     }
 
     function renderConnection() {
@@ -1480,7 +1726,9 @@ HTML_TEMPLATE = """<!doctype html>
     async function refreshBootstrap() {
       const bootstrap = await api("/api/bootstrap");
       state.bootstrap = bootstrap;
+      state.settings = bootstrap.settings || null;
       renderConnection();
+      renderSettings();
       state.ollama = [];
       try {
         const models = await api("/api/ollama/models");
@@ -1506,8 +1754,43 @@ HTML_TEMPLATE = """<!doctype html>
         app: appInfo,
         config: configInfo,
         providers: providersInfo,
+        settings: bootstrap.settings || null,
+        project_config: bootstrap.project_config || null,
       });
       await refreshLists();
+    }
+
+    function collectSettings() {
+      const form = $("settings-form");
+      const data = Object.fromEntries(new FormData(form).entries());
+      data.auto_install_opencode = Boolean(form.elements.namedItem("auto_install_opencode").checked);
+      data.auto_start_server = Boolean(form.elements.namedItem("auto_start_server").checked);
+      ["proxy_timeout", "server_start_timeout"].forEach((key) => {
+        if (data[key] === "") {
+          delete data[key];
+        } else {
+          data[key] = Number(data[key]);
+        }
+      });
+      return data;
+    }
+
+    async function saveSettings(event) {
+      event.preventDefault();
+      $("settings-note").textContent = "Saving settings...";
+      try {
+        const result = await api("/api/settings", {
+          method: "PUT",
+          body: JSON.stringify(collectSettings()),
+        });
+        state.settings = result.settings || null;
+        $("settings-note").textContent = "Settings saved.";
+        await refreshBootstrap();
+        connectEvents();
+      } catch (error) {
+        $("settings-note").textContent = `Unable to save settings: ${error.message}`;
+        throw error;
+      }
     }
 
     async function sendFormJson(url, payload) {
@@ -1682,6 +1965,8 @@ HTML_TEMPLATE = """<!doctype html>
     $("btn-delete").addEventListener("click", () => runSessionAction("delete"));
     $("new-session-form").addEventListener("submit", createSession);
     $("prompt-form").addEventListener("submit", sendPrompt);
+    $("settings-form").addEventListener("submit", saveSettings);
+    $("reload-settings").addEventListener("click", refreshBootstrap);
     $("send-shell-sample").addEventListener("click", runShellSample);
     $("session-filter").addEventListener("input", renderSessions);
     $("model-filter").addEventListener("input", renderModels);

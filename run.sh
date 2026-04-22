@@ -4,16 +4,55 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 UPSTREAM_URL="${OPENCODE_SERVER_URL:-http://127.0.0.1:4096}"
-UPSTREAM_URL="${UPSTREAM_URL%/}"
 VENV_DIR="${OPENCODE_VENV_DIR:-.venv}"
 SERVER_LOG_DIR="${OPENCODE_SERVER_LOG_DIR:-$HOME/.cache/opencode-web}"
 SERVER_LOG_FILE="${OPENCODE_SERVER_LOG_FILE:-$SERVER_LOG_DIR/opencode-server.log}"
 AUTO_INSTALL_OPENCODE="${OPENCODE_AUTO_INSTALL:-1}"
 AUTO_START_SERVER="${OPENCODE_AUTO_START_SERVER:-1}"
+SETTINGS_FILE="${OPENCODE_WEB_SETTINGS_FILE:-$PWD/settings.json}"
 export OPENCODE_CONFIG="${OPENCODE_CONFIG:-$PWD/opencode.json}"
 export OPENCODE_CONFIG_DIR="${OPENCODE_CONFIG_DIR:-$PWD/.opencode}"
-OPENCODE_INSTALL_URL="${OPENCODE_INSTALL_URL:-https://opencode.ai/install}"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
+
+load_saved_settings() {
+  if [[ -f "$SETTINGS_FILE" ]]; then
+    eval "$("$PYTHON_BIN" - "$SETTINGS_FILE" <<'PY'
+import json
+import shlex
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+data = json.loads(path.read_text())
+mapping = {
+    "OPENCODE_SERVER_URL": data.get("upstream_url"),
+    "OPENCODE_SERVER_USERNAME": data.get("upstream_username"),
+    "OPENCODE_SERVER_PASSWORD": data.get("upstream_password"),
+    "OLLAMA_BASE_URL": data.get("ollama_url"),
+    "OPENCODE_MODEL": data.get("default_model"),
+    "OPENCODE_PROXY_TIMEOUT": data.get("proxy_timeout"),
+    "OPENCODE_SERVER_START_TIMEOUT": data.get("server_start_timeout"),
+    "OPENCODE_INSTALL_URL": data.get("install_url"),
+    "OPENCODE_INSTALL_VERSION": data.get("install_version"),
+    "OPENCODE_AUTO_INSTALL": "1" if data.get("auto_install_opencode", True) else "0",
+    "OPENCODE_AUTO_START_SERVER": "1" if data.get("auto_start_server", True) else "0",
+}
+for key, value in mapping.items():
+    if value is None or value == "":
+        continue
+    print(f"export {key}={shlex.quote(str(value))}")
+PY
+)"
+  fi
+}
+
+load_saved_settings
+
+UPSTREAM_URL="${OPENCODE_SERVER_URL:-http://127.0.0.1:4096}"
+UPSTREAM_URL="${UPSTREAM_URL%/}"
+AUTO_INSTALL_OPENCODE="${OPENCODE_AUTO_INSTALL:-1}"
+AUTO_START_SERVER="${OPENCODE_AUTO_START_SERVER:-1}"
+OPENCODE_INSTALL_URL="${OPENCODE_INSTALL_URL:-https://opencode.ai/install}"
 
 ensure_python_env() {
   local python_bin="$1"
