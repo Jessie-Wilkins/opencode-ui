@@ -178,15 +178,26 @@ def project_config_from_settings(settings: dict[str, Any]) -> dict[str, Any]:
         "$schema": "https://opencode.ai/config.json",
         "default_agent": settings["default_agent"],
     }
-    if settings["default_model"]:
-        config["model"] = settings["default_model"]
-    if settings["ollama_url"]:
+    default_model = str(settings.get("default_model") or "").strip()
+    ollama_url = str(settings.get("ollama_url") or "").rstrip("/")
+    if default_model:
+        config["model"] = default_model
+    if ollama_url:
+        provider: dict[str, Any] = {
+            "options": {
+                "baseURL": f"{ollama_url}/v1",
+            },
+        }
+        if default_model.startswith("ollama/"):
+            model_id = default_model.split("/", 1)[1].strip()
+            if model_id:
+                provider["models"] = {
+                    model_id: {
+                        "name": model_id,
+                    }
+                }
         config["provider"] = {
-            "ollama": {
-                "options": {
-                    "baseURL": f"{settings['ollama_url'].rstrip('/')}/v1",
-                },
-            }
+            "ollama": provider,
         }
     return config
 
@@ -800,7 +811,9 @@ async def ollama_snippet(model: str = Query(..., min_length=1)) -> dict[str, Any
         "model": provider_model,
         "provider": {
             "ollama": {
-                "baseURL": f"{OLLAMA_URL}/v1",
+                "options": {
+                    "baseURL": f"{OLLAMA_URL}/v1",
+                },
                 "models": {
                     model: {
                         "name": model,
@@ -1239,6 +1252,7 @@ HTML_TEMPLATE = """<!doctype html>
               <div class="btnrow">
                 <button class="btn primary" id="copy-model-snippet" type="button">Copy config snippet</button>
                 <button class="btn" id="copy-model-ref" type="button">Copy model ref</button>
+                <button class="btn" id="apply-model" type="button">Use as default</button>
               </div>
               <div class="code" id="model-snippet">Choose a local Ollama model above.</div>
             </div>
@@ -1293,6 +1307,7 @@ HTML_TEMPLATE = """<!doctype html>
                 <button class="btn primary" type="submit">Send message</button>
                 <button class="btn" type="button" id="send-shell-sample">Insert shell sample</button>
               </div>
+              <div class="footer-note" id="prompt-note">The selected model must exist in the OpenCode config before OpenCode will accept a message.</div>
             </form>
           </div>
         </section>
@@ -1424,7 +1439,11 @@ HTML_TEMPLATE = """<!doctype html>
         data = await response.text();
       }
       if (!response.ok) {
-        throw new Error(typeof data === "string" ? data : JSON.stringify(data));
+        if (typeof data === "string") {
+          throw new Error(`${response.status} ${response.statusText}: ${data}`);
+        }
+        const detail = data?.detail ?? data?.error ?? data?.message ?? data;
+        throw new Error(`${response.status} ${response.statusText}: ${pretty(detail)}`);
       }
       return data;
     }
@@ -1640,6 +1659,8 @@ HTML_TEMPLATE = """<!doctype html>
           state.selectedModelRef = ref;
           $("selected-model").value = ref;
           $("prompt-model").value = ref;
+          const defaultModelInput = $("settings-form").elements.namedItem("default_model");
+          if (defaultModelInput) defaultModelInput.value = ref;
           try {
             const snippet = await api(`/api/ollama/snippet?model=${encodeURIComponent(modelId)}`);
             $("model-snippet").textContent = pretty(snippet.snippet);
@@ -1814,15 +1835,22 @@ HTML_TEMPLATE = """<!doctype html>
       const form = event.currentTarget;
       const values = Object.fromEntries(new FormData(form).entries());
       if (!values.prompt.trim()) return;
+      $("prompt-note").textContent = "Sending message to OpenCode...";
       const payload = {
         parts: [{ type: "text", text: values.prompt }],
       };
       if (values.agent) payload.agent = values.agent;
       if (values.model) payload.model = values.model;
       if (values.noReply === "true") payload.noReply = true;
-      await sendFormJson(`/api/opencode/session/${encodeURIComponent(state.selectedSessionId)}/message`, payload);
-      form.reset();
-      await refreshSelectedSession();
+      try {
+        await sendFormJson(`/api/opencode/session/${encodeURIComponent(state.selectedSessionId)}/message`, payload);
+        form.reset();
+        $("prompt-note").textContent = "Message sent.";
+        await refreshSelectedSession();
+      } catch (error) {
+        $("prompt-note").textContent = `Unable to send message: ${error.message}`;
+        throw error;
+      }
     }
 
     async function runShellSample() {
@@ -1911,6 +1939,27 @@ HTML_TEMPLATE = """<!doctype html>
       $("model-snippet").textContent = pretty(payload.snippet);
     }
 
+    async function applySelectedModel() {
+      const modelRef = $("selected-model").value.trim();
+      if (!modelRef.startsWith("ollama/")) {
+        $("settings-note").textContent = "Pick an Ollama model first, then use it as the default.";
+        return;
+      }
+      const form = $("settings-form");
+      if (form?.elements?.namedItem("default_model")) {
+        form.elements.namedItem("default_model").value = modelRef;
+      }
+      $("settings-note").textContent = "Saving selected model to OpenCode config...";
+      const result = await api("/api/settings", {
+        method: "PUT",
+        body: JSON.stringify(collectSettings()),
+      });
+      state.settings = result.settings || state.settings;
+      $("settings-note").textContent = `Saved ${modelRef} to the OpenCode config.`;
+      await refreshBootstrap();
+      connectEvents();
+    }
+
     async function refreshModelSnippet() {
       const modelRef = $("selected-model").value.trim();
       if (!modelRef.startsWith("ollama/")) {
@@ -1973,6 +2022,7 @@ HTML_TEMPLATE = """<!doctype html>
     $("selected-model").addEventListener("change", refreshModelSnippet);
     $("copy-model-snippet").addEventListener("click", copyModelSnippet);
     $("copy-model-ref").addEventListener("click", async () => copyText($("selected-model").value.trim()));
+    $("apply-model").addEventListener("click", applySelectedModel);
     $("install-opencode").addEventListener("click", installOpenCode);
     $("start-opencode-server").addEventListener("click", startOpenCodeServer);
     $("search-file").addEventListener("click", () => searchFiles("file"));

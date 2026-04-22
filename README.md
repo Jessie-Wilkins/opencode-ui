@@ -95,3 +95,7 @@ The UI lists local Ollama models from the Ollama API and converts them into Open
 - `ollama/qwen2.5-coder`
 
 OpenCode’s model docs say the default model format is `provider_id/model_id`, and its provider docs support custom provider base URLs. For local Ollama, this wrapper generates a config snippet pointing at `http://127.0.0.1:11434/v1`.
+
+When you pick a model in the UI, the `Selected OpenCode model` field is updated. Use the `Use as default` button in the Ollama panel or the main Settings form’s `Default model` field to persist it into the generated `opencode.json`.
+
+If OpenCode rejects a message request, the prompt panel now shows the upstream error text directly so you can see which setting or model reference is invalid.
