@@ -1522,11 +1522,18 @@ HTML_TEMPLATE = """<!doctype html>
         ...options,
       });
       const contentType = response.headers.get("content-type") || "";
-      let data;
+      const raw = await response.text();
+      let data = raw;
       if (contentType.includes("application/json")) {
-        data = await response.json();
-      } else {
-        data = await response.text();
+        if (raw.trim()) {
+          try {
+            data = JSON.parse(raw);
+          } catch (error) {
+            throw new Error(`Invalid JSON from ${path}: ${raw.slice(0, 200)}`);
+          }
+        } else {
+          data = null;
+        }
       }
       if (!response.ok) {
         if (typeof data === "string") {
