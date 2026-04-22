@@ -109,6 +109,22 @@ config_path.write_text(json.dumps(config, indent=2) + "\n")
 PY
 }
 
+find_opencode_binary() {
+  if command -v opencode >/dev/null 2>&1; then
+    command -v opencode
+    return 0
+  fi
+
+  for candidate in "$HOME/.opencode/bin/opencode" "$HOME/.local/bin/opencode" "$HOME/bin/opencode"; do
+    if [[ -x "$candidate" ]]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 ensure_python_env() {
   local python_bin="$1"
   local venv_python="$VENV_DIR/bin/python"
@@ -133,8 +149,10 @@ ensure_python_env() {
 }
 
 ensure_opencode_binary() {
-  if command -v opencode >/dev/null 2>&1; then
-    if opencode serve --help >/dev/null 2>&1; then
+  local binary
+  if binary="$(find_opencode_binary)"; then
+    if "$binary" serve --help >/dev/null 2>&1; then
+      export PATH="$(dirname "$binary"):$PATH"
       return 0
     fi
     echo "Installed opencode binary is incompatible with OpenCode Lens. Expected a version with 'opencode serve' support." >&2
@@ -155,11 +173,11 @@ ensure_opencode_binary() {
     fi
   done
 
-  if ! command -v opencode >/dev/null 2>&1; then
+  if ! binary="$(find_opencode_binary)"; then
     return 1
   fi
 
-  opencode serve --help >/dev/null 2>&1
+  "$binary" serve --help >/dev/null 2>&1
 }
 
 upstream_is_local() {
@@ -207,10 +225,16 @@ start_local_opencode_server() {
     return 0
   fi
 
+  local opencode_binary
+  if ! opencode_binary="$(find_opencode_binary)"; then
+    echo "OpenCode binary is still not visible after installation." >&2
+    return 1
+  fi
+
   mkdir -p "$SERVER_LOG_DIR"
   touch "$SERVER_LOG_FILE"
 
-  nohup env OPENCODE_CONFIG="$OPENCODE_CONFIG" OPENCODE_CONFIG_DIR="$OPENCODE_CONFIG_DIR" opencode serve --hostname "$host" --port "$port" >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
+  nohup env OPENCODE_CONFIG="$OPENCODE_CONFIG" OPENCODE_CONFIG_DIR="$OPENCODE_CONFIG_DIR" "$opencode_binary" serve --hostname "$host" --port "$port" >>"$SERVER_LOG_FILE" 2>&1 </dev/null &
   local opencode_pid=$!
 
   for _ in $(seq 1 40); do

@@ -325,7 +325,17 @@ apply_app_settings(load_app_settings())
 
 
 def opencode_binary_path() -> str | None:
-    return shutil.which("opencode")
+    binary = shutil.which("opencode")
+    if binary:
+        return binary
+    for candidate in (
+        Path.home() / ".opencode" / "bin" / "opencode",
+        Path.home() / ".local" / "bin" / "opencode",
+        Path.home() / "bin" / "opencode",
+    ):
+        if candidate.exists():
+            return str(candidate)
+    return None
 
 
 async def probe_opencode() -> dict[str, Any]:
@@ -567,8 +577,9 @@ async def start_opencode_server() -> dict[str, Any]:
         log_file = log_dir / "opencode-server.log"
         log_handle = log_file.open("ab")
         try:
+            launch_binary = binary
             proc = subprocess.Popen(
-                [binary, "serve", "--hostname", host, "--port", str(port)],
+                [launch_binary, "serve", "--hostname", host, "--port", str(port)],
                 cwd=str(Path.cwd()),
                 env={
                     **os.environ,
